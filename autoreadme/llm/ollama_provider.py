@@ -4,7 +4,7 @@ from .base import LLMProvider
 class OllamaProvider(LLMProvider):
     """Local Ollama provider — no API key required."""
 
-    DEFAULT_MODEL = "qwen2.5-coder:14b"
+    DEFAULT_MODEL = "qwen2.5-coder:1.5b"
 
     def __init__(self, model: str | None = None):
         try:

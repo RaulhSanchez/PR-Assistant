@@ -170,19 +170,28 @@ def generate_pr_companion_report(
             report = analyze_changes(fp, old_content, new_content)
             reports.append(report)
             if report.is_breaking:
-                breaking_changes.extend(report.signature_changes)
+                for bc in report.signature_changes:
+                    breaking_changes.append(f"Firma cambiada: {fp} -> {bc}")
+                for func in report.removed_functions:
+                    breaking_changes.append(f"Función ELIMINADA: {fp} -> {func}")
 
     # LLM summary
     summary = llm.rag_chat(
-        f"Genera un resumen ejecutivo de este Pull Request detallando los cambios clave.",
-        [f"Diff:\n{diff[:2000]}"]
+        "Actúa como un experto revisor de código. Analiza el siguiente DIFF y genera un resumen ejecutivo conciso. "
+        "REGLAS CRÍTICAS: 1) Prohibido el uso de lenguaje especulativo o dubitativo (evita 'es posible', 'tal vez', 'seguramente'). "
+        "2) Si el diff no contiene información suficiente para explicar un cambio, limítate a describir lo que ves sin inventar motivos. "
+        "3) Sé directo, técnico y 100% factual.",
+        [f"Diff:\n{diff[:3000]}"]
     )
     
     # LLM test suggestions
     test_suggestions = llm.rag_chat(
-        f"Basándote en los cambios realizados en el diff, sugiere qué casos de prueba "
-        f"deberían añadirse o actualizarse.",
-        [f"Diff:\n{diff[:2000]}"]
+        "Eres un ingeniero de QA Senior experto en testing unitario y de integración. "
+        "Analiza el DIFF y sugiere casos de prueba EXACTOS y con fundamentos lógicos claros. "
+        "REGLAS CRÍTICAS: 1) No des consejos genéricos de testing. 2) Cada sugerencia debe estar vinculada directamente a una línea o función modificada. "
+        "3) Si no hay suficiente información para sugerir un test útil y específico, responde 'No hay suficiente contexto en el diff para sugerencias específicas'. "
+        "4) Elimina cualquier rastro de duda o lenguaje vago.",
+        [f"Diff:\n{diff[:3000]}"]
     )
     
     # Build report
