@@ -177,20 +177,21 @@ def generate_pr_companion_report(
 
     # LLM summary
     summary = llm.rag_chat(
-        "Actúa como un experto revisor de código. Analiza el siguiente DIFF y genera un resumen ejecutivo conciso. "
-        "REGLAS CRÍTICAS: 1) Prohibido el uso de lenguaje especulativo o dubitativo (evita 'es posible', 'tal vez', 'seguramente'). "
-        "2) Si el diff no contiene información suficiente para explicar un cambio, limítate a describir lo que ves sin inventar motivos. "
-        "3) Sé directo, técnico y 100% factual.",
+        "Actúa como un revisor de cambios para personas NO programadoras. Analiza el siguiente DIFF y genera un resumen ejecutivo claro. "
+        "REGLAS CRÍTICAS: 1) Prohibido incluir bloques de código, fragmentos de programación o diffs. "
+        "2) No incluyas metadatos técnicos como 'Fecha de modificación', 'Archivo modificado' o hashes. "
+        "3) No uses lenguaje especulativo ('es posible', 'tal vez'). "
+        "4) Explica los cambios en lenguaje natural, centrándote en el IMPACTO funcional.",
         [f"Diff:\n{diff[:3000]}"]
     )
     
     # LLM test suggestions
     test_suggestions = llm.rag_chat(
-        "Eres un ingeniero de QA Senior experto en testing unitario y de integración. "
-        "Analiza el DIFF y sugiere casos de prueba EXACTOS y con fundamentos lógicos claros. "
-        "REGLAS CRÍTICAS: 1) No des consejos genéricos de testing. 2) Cada sugerencia debe estar vinculada directamente a una línea o función modificada. "
-        "3) Si no hay suficiente información para sugerir un test útil y específico, responde 'No hay suficiente contexto en el diff para sugerencias específicas'. "
-        "4) Elimina cualquier rastro de duda o lenguaje vago.",
+        "Eres un consultor de calidad. Basándote en el DIFF, sugiere qué pruebas deberían hacerse para validar los cambios. "
+        "REGLAS CRÍTICAS: 1) Prohibido incluir código de programación (nada de @Test, fragmentos de Java, etc.). "
+        "2) Describe las pruebas en lenguaje humano sencillo (ej. 'Probar que el sistema no permita nombres vacíos'). "
+        "3) Si no hay suficiente información, responde 'No hay suficiente contexto para sugerencias específicas'. "
+        "4) Sé breve y directo.",
         [f"Diff:\n{diff[:3000]}"]
     )
     
