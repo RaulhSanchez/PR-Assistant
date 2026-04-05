@@ -205,6 +205,31 @@ async def webhook(
 
 # ── Stripe ───────────────────────────────────────────────────────────────────
 
+@app.get("/checkout")
+async def checkout_by_org(org: str):
+    """Look up installation_id from GitHub org/username, then redirect to Stripe checkout."""
+    if not STRIPE_API_KEY or not STRIPE_PRICE_ID:
+        raise HTTPException(status_code=503, detail="Payments not configured yet")
+    token_jwt = get_jwt()
+    headers = {"Authorization": f"Bearer {token_jwt}", "Accept": "application/vnd.github+json"}
+    installation_id = None
+    async with httpx.AsyncClient() as client:
+        # Try org first, then user
+        for endpoint in [f"/orgs/{org}/installation", f"/users/{org}/installation"]:
+            r = await client.get(f"https://api.github.com/app{endpoint.replace('/app','')}", headers=headers)
+            if r.status_code == 200:
+                installation_id = r.json().get("id")
+                break
+    if not installation_id:
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            "<h2 style='font-family:sans-serif;padding:2rem'>PR-Assistant not installed for this org.<br/>"
+            f"<a href='https://github.com/apps/repo-docs-ai'>Install it first →</a></h2>",
+            status_code=404
+        )
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/create-checkout-session?installation_id={installation_id}", status_code=302)
+
 @app.get("/create-checkout-session")
 async def create_checkout_session(installation_id: int):
     if not STRIPE_API_KEY or not STRIPE_PRICE_ID:

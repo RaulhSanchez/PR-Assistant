@@ -923,7 +923,7 @@
           <li>Test suggestions</li>
           <li>Priority support</li>
         </ul>
-        <a onclick="startCheckout()" class="btn-plan btn-plan-primary">Get started Pro →</a>
+        <a href="#" onclick="openUpgradeModal(event)" class="btn-plan btn-plan-primary">Get started →</a>
       </div>
     </div>
     <p style="text-align:center;margin-top:1.5rem;font-size:.85rem;color:var(--muted)">No credit card required for Free
@@ -942,6 +942,67 @@
       Install on GitHub — It's Free
     </a>
   </section>
+
+  <!-- UPGRADE MODAL -->
+  <div id="upgrade-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;padding:2rem;max-width:440px;width:90%;position:relative;">
+      <button onclick="closeUpgradeModal()" style="position:absolute;top:1rem;right:1rem;background:none;border:none;color:#8b949e;font-size:1.2rem;cursor:pointer;">✕</button>
+      <div style="font-size:2rem;margin-bottom:1rem;">🚀</div>
+      <h3 style="font-size:1.2rem;font-weight:800;margin-bottom:.5rem;">Upgrade to PR-Assistant Pro</h3>
+      <p style="color:#8b949e;font-size:.9rem;margin-bottom:1.5rem;">Enter your GitHub organization or username to get started.</p>
+      <input id="gh-org-input" type="text" placeholder="e.g. my-company or my-username"
+        style="width:100%;padding:.7rem 1rem;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;font-size:.95rem;margin-bottom:1rem;outline:none;"
+        onkeydown="if(event.key==='Enter')submitUpgrade()" />
+      <button onclick="submitUpgrade()"
+        style="width:100%;background:#2f81f7;color:#fff;border:none;padding:.75rem;border-radius:8px;font-weight:700;font-size:1rem;cursor:pointer;">
+        Continue to payment →
+      </button>
+      <p id="modal-error" style="color:#f85149;font-size:.82rem;margin-top:.75rem;display:none;"></p>
+      <p style="color:#8b949e;font-size:.78rem;margin-top:1rem;text-align:center;">$12/month · Cancel anytime · Secure payment via Stripe</p>
+    </div>
+  </div>
+
+  <script>
+    const API = "https://pr-assistant-production-703c.up.railway.app";
+
+    function openUpgradeModal(e) {
+      e.preventDefault();
+      document.getElementById("upgrade-modal").style.display = "flex";
+      setTimeout(() => document.getElementById("gh-org-input").focus(), 100);
+    }
+
+    function closeUpgradeModal() {
+      document.getElementById("upgrade-modal").style.display = "none";
+      document.getElementById("modal-error").style.display = "none";
+    }
+
+    async function submitUpgrade() {
+      const org = document.getElementById("gh-org-input").value.trim();
+      const errEl = document.getElementById("modal-error");
+      if (!org) {
+        errEl.textContent = "Please enter your GitHub organization or username.";
+        errEl.style.display = "block";
+        return;
+      }
+      errEl.style.display = "none";
+      const btn = event.target;
+      btn.textContent = "Redirecting…";
+      btn.disabled = true;
+      try {
+        window.location.href = `${API}/checkout?org=${encodeURIComponent(org)}`;
+      } catch (e) {
+        errEl.textContent = "Something went wrong. Please try again.";
+        errEl.style.display = "block";
+        btn.textContent = "Continue to payment →";
+        btn.disabled = false;
+      }
+    }
+
+    // Close modal on backdrop click
+    document.getElementById("upgrade-modal").addEventListener("click", function(e) {
+      if (e.target === this) closeUpgradeModal();
+    });
+  </script>
 
   <!-- FOOTER -->
   <footer>
