@@ -5,9 +5,16 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    volumes:
+      - autoreadme-data:/app/data
+    environment:
+      - DB_PATH=/app/data/autoreadme.db
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
+
+volumes:
+  autoreadme-data:
 
 # Nota: Para probar localmente puedes usar 'ngrok' para exponer el puerto 8080 a Internet
 # y poner esa URL en la configuración del Webhook de tu GitHub App.

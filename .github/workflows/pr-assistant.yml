@@ -1,0 +1,42 @@
+name: PR Assistant (Free Tier)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Necesario para obtener el diff con la rama base
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PR Assistant
+        run: |
+          pip install .[gemini]
+
+      - name: Run Analysis
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          # Obtenemos la rama base del PR
+          BASE_BRANCH=${{ github.event.pull_request.base.ref }}
+          # Ejecutamos el comando y guardamos el reporte
+          autoreadme pr --base origin/$BASE_BRANCH --provider gemini > pr_report.md
+
+      - name: Post Comment
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: pr_report.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

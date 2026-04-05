@@ -12,11 +12,19 @@ import jwt
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
+from .database import init_db, check_limits, log_usage, update_repo_count, get_or_create_installation
 
-app = FastAPI(title="autoreadme GitHub App")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize DB
+    init_db()
+    yield
+
+app = FastAPI(title="autoreadme GitHub App", lifespan=lifespan)
 
 @app.get("/")
 @app.get("/health")
@@ -82,6 +90,9 @@ async def process_pr(installation_id: int, repo_full_name: str, pr_number: int, 
         # Generate report — diff is base_branch...HEAD (the PR's head branch)
         report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
 
+        # Log usage
+        log_usage(installation_id)
+
         # Post comment to PR
         comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
         headers = {
@@ -115,10 +126,36 @@ async def webhook(
     payload = json.loads(body)
     event = request.headers.get("X-GitHub-Event")
 
+    if event == "installation":
+        action = payload.get("action")
+        installation_id = payload["installation"]["id"]
+        if action in ["created", "new_permissions_accepted"]:
+            # On creation, we ensure the installation exists in DB
+            get_or_create_installation(installation_id)
+        return {"status": "ok"}
+
+    if event == "installation_repositories":
+        action = payload.get("action")
+        installation_id = payload["installation"]["id"]
+        # In a real app we'd query GitHub to get the exact current count
+        # For now, let's assume we just need to ensure the record exists
+        get_or_create_installation(installation_id)
+        return {"status": "ok"}
+
     if event == "pull_request":
         action = payload.get("action")
         if action in ["opened", "synchronize"]:
             installation_id = payload["installation"]["id"]
+            
+            # CHECK LIMITS
+            allowed, reason = check_limits(installation_id)
+            if not allowed:
+                # Post a "Limit reached" comment instead of analyzing
+                repo_full_name = payload["repository"]["full_name"]
+                pr_number = payload["pull_request"]["number"]
+                background_tasks.add_task(post_limit_reached_comment, installation_id, repo_full_name, pr_number, reason)
+                return {"status": "limit_reached", "reason": reason}
+
             repo_full_name = payload["repository"]["full_name"]
             pr_number = payload["pull_request"]["number"]
             base_branch = payload["pull_request"]["base"]["ref"]
@@ -137,6 +174,17 @@ async def webhook(
             return {"status": "processing"}
 
     return {"status": "ignored"}
+
+async def post_limit_reached_comment(installation_id: int, repo_full_name: str, pr_number: int, reason: str):
+    token = await get_installation_token(installation_id)
+    comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    body = f"### ⚠️ Límite de Plan Gratuito Alcanzado\n\n{reason}\n\nPara seguir disfrutando de PR-Assistant sin límites, considera actualizar a nuestro plan Pro."
+    async with httpx.AsyncClient() as client:
+        await client.post(comment_url, headers=headers, json={"body": body})
 
 if __name__ == "__main__":
     import uvicorn
