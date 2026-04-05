@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
+from typing import Optional
 
 # Support both PostgreSQL (production) and SQLite (local dev)
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -24,17 +25,16 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS installations (
             installation_id BIGINT PRIMARY KEY,
+            org_name TEXT,
             repo_count INTEGER DEFAULT 0,
             plan_type TEXT DEFAULT 'free',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS usage_logs (
-            id SERIAL PRIMARY KEY,
-            installation_id BIGINT,
-            event_type TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS pending_pro_activations (
+            org_name TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -116,6 +116,81 @@ def check_limits(installation_id: int) -> tuple[bool, str]:
         return False, "Has alcanzado el límite de 50 análisis de PR mensuales del plan gratuito."
 
     return True, ""
+
+def add_pending_pro(org_name: str):
+    conn = _get_conn()
+    cursor = conn.cursor()
+    ph = _placeholder()
+    cursor.execute(
+        f"INSERT INTO pending_pro_activations (org_name) VALUES ({ph})",
+        (org_name,)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def is_paid(org_name: str) -> bool:
+    conn = _get_conn()
+    cursor = conn.cursor()
+    ph = _placeholder()
+    # Check if they have an installation that is Pro
+    cursor.execute(
+        f"SELECT 1 FROM installations WHERE org_name = {ph} AND plan_type = 'pro'",
+        (org_name,)
+    )
+    if cursor.fetchone():
+        return True
+    # Check if they have a pending activation
+    cursor.execute(
+        f"SELECT 1 FROM pending_pro_activations WHERE org_name = {ph}",
+        (org_name,)
+    )
+    res = cursor.fetchone() is not None
+    cursor.close()
+    conn.close()
+    return res
+
+def check_and_activate_pro(installation_id: int, org_name: str) -> bool:
+    conn = _get_conn()
+    cursor = conn.cursor()
+    ph = _placeholder()
+    # Always save the org name for future lookups
+    cursor.execute(
+        f"UPDATE installations SET org_name = {ph} WHERE installation_id = {ph}",
+        (org_name, installation_id)
+    )
+    
+    cursor.execute(
+        f"SELECT 1 FROM pending_pro_activations WHERE org_name = {ph}",
+        (org_name,)
+    )
+    if cursor.fetchone():
+        upgrade_to_pro(installation_id)
+        cursor.execute(
+            f"DELETE FROM pending_pro_activations WHERE org_name = {ph}",
+            (org_name,)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return False
+
+def get_installation_by_org(org_name: str) -> Optional[int]:
+    conn = _get_conn()
+    cursor = conn.cursor()
+    ph = _placeholder()
+    cursor.execute(
+        f"SELECT installation_id FROM installations WHERE org_name = {ph}",
+        (org_name,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row[0] if row else None
 
 def upgrade_to_pro(installation_id: int):
     conn = _get_conn()

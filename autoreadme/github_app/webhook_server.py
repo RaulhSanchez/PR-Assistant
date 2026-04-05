@@ -8,6 +8,7 @@ import subprocess
 from typing import Optional
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse, quote
 
 import jwt
 import httpx
@@ -17,7 +18,11 @@ from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
-from .database import init_db, check_limits, log_usage, update_repo_count, get_or_create_installation, upgrade_to_pro
+from .database import (
+    init_db, check_limits, log_usage, update_repo_count, 
+    get_or_create_installation, upgrade_to_pro, add_pending_pro, 
+    check_and_activate_pro, is_paid, get_installation_by_org
+)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -161,8 +166,16 @@ async def webhook(
     # Track new installations
     if event == "installation":
         installation_id = payload["installation"]["id"]
+        org_name = payload["installation"]["account"]["login"]
         repos_added = payload.get("repositories", [])
-        inst = get_or_create_installation(installation_id)
+        
+        # This will create the installation record if it doesn't exist
+        get_or_create_installation(installation_id)
+        
+        # Check if they paid BEFORE installing
+        # This ALSO updates the org_name in the installations table
+        check_and_activate_pro(installation_id, org_name)
+
         if repos_added:
             update_repo_count(installation_id, len(repos_added))
         return {"status": "ok"}
@@ -204,44 +217,39 @@ async def webhook(
 
     return {"status": "ignored"}
 
+@app.get("/check-payment")
+async def check_payment(org: str):
+    """Check if an org/username has already paid for Pro."""
+    if is_paid(org):
+        return {"paid": True}
+    return {"paid": False}
+
 # ── Stripe ───────────────────────────────────────────────────────────────────
 
 @app.get("/checkout")
 async def checkout_by_org(org: str):
-    """Look up installation_id from GitHub org/username, then redirect to Stripe checkout."""
+    """Redirect directly to Stripe checkout using the provided GitHub org/username."""
     if not STRIPE_API_KEY or not STRIPE_PRICE_ID:
         raise HTTPException(status_code=503, detail="Payments not configured yet")
-    token_jwt = get_jwt()
-    headers = {"Authorization": f"Bearer {token_jwt}", "Accept": "application/vnd.github+json"}
-    installation_id = None
-    async with httpx.AsyncClient() as client:
-        # Try org first, then user
-        for path in [f"/orgs/{org}/installation", f"/users/{org}/installation"]:
-            r = await client.get(f"https://api.github.com{path}", headers=headers)
-            if r.status_code == 200:
-                installation_id = r.json().get("id")
-                break
-    if not installation_id:
-        return HTMLResponse(
-            "<h2 style='font-family:sans-serif;padding:2rem'>PR-Assistant not installed for this org.<br/>"
-            f"<a href='https://github.com/apps/{GITHUB_APP_NAME}'>Install it first →</a></h2>",
-            status_code=404
-        )
-    return RedirectResponse(url=f"/create-checkout-session?installation_id={installation_id}", status_code=302)
+    
+    # We no longer check if installed. We just go to Stripe.
+    return RedirectResponse(
+        url=f"/create-checkout-session?org_name={quote(org)}", 
+        status_code=302
+    )
 
 @app.get("/create-checkout-session")
-async def create_checkout_session(installation_id: int):
+async def create_checkout_session(org_name: str):
     if not STRIPE_API_KEY or not STRIPE_PRICE_ID:
         raise HTTPException(status_code=503, detail="Payments not configured")
     try:
         session = stripe.checkout.Session.create(
             line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
             mode="subscription",
-            success_url=f"{BASE_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
+            success_url=f"https://github.com/apps/{GITHUB_APP_NAME}/installations/new",
             cancel_url=f"{BASE_URL}/cancel",
-            metadata={"installation_id": str(installation_id)},
+            metadata={"org_name": org_name},
         )
-        # Redirect user to Stripe checkout
         return RedirectResponse(url=session.url, status_code=303)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -259,10 +267,16 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        installation_id = session.get("metadata", {}).get("installation_id")
-        if installation_id:
-            upgrade_to_pro(int(installation_id))
-            print(f"✅ Installation {installation_id} upgraded to PRO")
+        org_name = session.get("metadata", {}).get("org_name")
+        if org_name:
+            # Try to upgrade immediately if already installed
+            installation_id = get_installation_by_org(org_name)
+            if installation_id:
+                upgrade_to_pro(installation_id)
+                print(f"🚀 Existing installation {installation_id} upgraded to Pro for {org_name}")
+            else:
+                add_pending_pro(org_name)
+                print(f"💰 Purchase completed for {org_name}. Pending installation.")
 
     return {"status": "success"}
 
