@@ -141,74 +141,126 @@ def generate_readme(
     return readme_md
 
 
+def build_pr_report(
+    diff: str,
+    llm: LLMProvider,
+    breaking_changes: list[str] | None = None,
+    pr_title: str = "",
+    pr_url: str = "",
+) -> str:
+    """
+    Core report builder — accepts a diff string directly.
+    Used by both the CLI and the GitHub App webhook.
+
+    Args:
+        diff: The full git/GitHub diff text.
+        llm: An initialized LLMProvider instance.
+        breaking_changes: Optional pre-computed list of breaking change strings.
+        pr_title: Optional PR title for context.
+        pr_url: Optional PR URL to include in the report.
+    """
+    diff_context = [f"Diff:\n{diff[:3000]}"]
+    if pr_title:
+        diff_context.insert(0, f"Título del PR: {pr_title}")
+
+    # ── Plain-language summary ─────────────────────────────────────────────
+    summary = llm.rag_chat(
+        "Actúa como un revisor de cambios para personas NO programadoras. "
+        "Analiza el siguiente DIFF y genera un resumen ejecutivo claro. "
+        "REGLAS CRÍTICAS: "
+        "1) Prohibido incluir bloques de código, fragmentos de programación o diffs. "
+        "2) No incluyas metadatos técnicos como 'Archivo modificado' o hashes. "
+        "3) No uses lenguaje especulativo ('es posible', 'tal vez'). "
+        "4) Explica los cambios en lenguaje natural, centrándote en el IMPACTO funcional.",
+        diff_context,
+    )
+
+    # ── Risk score ─────────────────────────────────────────────────────────
+    risk_response = llm.rag_chat(
+        "Basándote en el DIFF, asigna un RISK SCORE del 1 al 10 a este PR. "
+        "1 = cambio trivial (typo, comentario), 10 = cambio crítico (base de datos, autenticación, APIs públicas). "
+        "Responde SOLO con el número y una frase explicando el motivo. Ejemplo: '4 - Modifica lógica de negocio pero sin cambios en API pública.'",
+        diff_context,
+    )
+
+    # ── Test suggestions ───────────────────────────────────────────────────
+    test_suggestions = llm.rag_chat(
+        "Eres un consultor de calidad. Basándote en el DIFF, sugiere qué pruebas deberían "
+        "hacerse para validar los cambios. "
+        "REGLAS CRÍTICAS: "
+        "1) Prohibido incluir código de programación. "
+        "2) Describe las pruebas en lenguaje humano sencillo. "
+        "3) Si no hay suficiente información, responde 'No hay suficiente contexto para sugerencias específicas'. "
+        "4) Sé breve y directo.",
+        diff_context,
+    )
+
+    # ── PR size warning ────────────────────────────────────────────────────
+    lines_changed = len([l for l in diff.splitlines() if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))])
+    size_warning = ""
+    if lines_changed > 400:
+        size_warning = (
+            f"\n> ⚠️ **PR grande detectado** — {lines_changed} líneas modificadas. "
+            "Considera dividirlo en PRs más pequeños para facilitar la revisión."
+        )
+
+    # ── Build report ───────────────────────────────────────────────────────
+    report_md = ["## 🤖 autoreadme — PR Companion\n"]
+
+    if pr_title:
+        report_md.append(f"**{pr_title}**\n")
+    if size_warning:
+        report_md.append(size_warning + "\n")
+
+    report_md += [
+        "### 📋 Resumen para el equipo\n",
+        f"{summary}\n",
+        "### 🎯 Risk Score\n",
+        f"{risk_response}\n",
+    ]
+
+    if breaking_changes:
+        report_md.append("### ⚠️ Breaking Changes Detectados\n")
+        for bc in breaking_changes:
+            report_md.append(f"- 🔴 **ALERTA:** {bc}\n")
+        report_md.append("\n")
+
+    report_md += [
+        "### 🧪 Qué probar antes de aprobar\n",
+        f"{test_suggestions}\n",
+        "---\n",
+        "*Generado por [autoreadme](https://github.com/autoreadme/autoreadme) 🤖*",
+    ]
+
+    return "\n".join(report_md)
+
+
 def generate_pr_companion_report(
     project_path: str,
     llm: LLMProvider,
     base_branch: str = "main",
 ) -> str:
-    """Generate a Pull Request Companion report."""
+    """CLI entry point — fetches diff from local git then calls build_pr_report."""
     from .git_utils import get_git_diff, get_changed_files, get_file_content_at_rev
     from .differ import analyze_changes
-    import os
 
-    diff = get_git_diff(base_branch)
-    changed_files = get_changed_files(base_branch)
-    
-    reports = []
-    breaking_changes = []
-    
+    diff = get_git_diff(base_branch, cwd=project_path)
+    changed_files = get_changed_files(base_branch, cwd=project_path)
+
+    breaking_changes: list[str] = []
     for fp in changed_files:
         full_path = os.path.join(project_path, fp)
-        if not os.path.exists(full_path): continue
-        
+        if not os.path.exists(full_path):
+            continue
         with open(full_path, "r", encoding="utf-8") as f:
             new_content = f.read()
-            
-        old_content = get_file_content_at_rev(fp, base_branch)
-        
+        old_content = get_file_content_at_rev(fp, base_branch, cwd=project_path)
         if old_content:
             report = analyze_changes(fp, old_content, new_content)
-            reports.append(report)
             if report.is_breaking:
                 for bc in report.signature_changes:
-                    breaking_changes.append(f"Firma cambiada: {fp} -> {bc}")
+                    breaking_changes.append(f"Firma cambiada: {fp} → {bc}")
                 for func in report.removed_functions:
-                    breaking_changes.append(f"Función ELIMINADA: {fp} -> {func}")
+                    breaking_changes.append(f"Función eliminada: {fp} → {func}()")
 
-    # LLM summary
-    summary = llm.rag_chat(
-        "Actúa como un revisor de cambios para personas NO programadoras. Analiza el siguiente DIFF y genera un resumen ejecutivo claro. "
-        "REGLAS CRÍTICAS: 1) Prohibido incluir bloques de código, fragmentos de programación o diffs. "
-        "2) No incluyas metadatos técnicos como 'Fecha de modificación', 'Archivo modificado' o hashes. "
-        "3) No uses lenguaje especulativo ('es posible', 'tal vez'). "
-        "4) Explica los cambios en lenguaje natural, centrándote en el IMPACTO funcional.",
-        [f"Diff:\n{diff[:3000]}"]
-    )
-    
-    # LLM test suggestions
-    test_suggestions = llm.rag_chat(
-        "Eres un consultor de calidad. Basándote en el DIFF, sugiere qué pruebas deberían hacerse para validar los cambios. "
-        "REGLAS CRÍTICAS: 1) Prohibido incluir código de programación (nada de @Test, fragmentos de Java, etc.). "
-        "2) Describe las pruebas en lenguaje humano sencillo (ej. 'Probar que el sistema no permita nombres vacíos'). "
-        "3) Si no hay suficiente información, responde 'No hay suficiente contexto para sugerencias específicas'. "
-        "4) Sé breve y directo.",
-        [f"Diff:\n{diff[:3000]}"]
-    )
-    
-    # Build report
-    report_md = [
-        f"# 🤖 PR Companion\n",
-        f"## 📋 Resumen del Pull Request\n",
-        f"{summary}\n",
-    ]
-    
-    if breaking_changes:
-        report_md.append(f"## ⚠️ Detección de Breaking Changes\n")
-        for bc in breaking_changes:
-            report_md.append(f"- **ALERTA:** {bc}\n")
-        report_md.append("\n")
-        
-    report_md.append(f"## 🧪 Sugerencias de Tests\n")
-    report_md.append(f"{test_suggestions}\n")
-    
-    return "\n".join(report_md)
+    return build_pr_report(diff=diff, llm=llm, breaking_changes=breaking_changes)

@@ -7,6 +7,7 @@ PROVIDER_MAP = {
     "openai": ("autoreadme.llm.openai_provider", "OpenAIProvider"),
     "anthropic": ("autoreadme.llm.anthropic_provider", "AnthropicProvider"),
     "gemini": ("autoreadme.llm.gemini_provider", "GeminiProvider"),
+    "groq": ("autoreadme.llm.groq_provider", "GroqProvider"),
 }
 
 

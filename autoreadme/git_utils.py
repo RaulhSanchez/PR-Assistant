@@ -1,45 +1,33 @@
 import subprocess
 import os
 
-def get_git_diff(base="main"):
+def _run_git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
+    """Run a git command in a specific directory."""
+    return subprocess.run(args, capture_output=True, text=True, cwd=cwd)
+
+def get_git_diff(base: str = "main", cwd: str = ".") -> str:
     """Get the current diff against a base branch."""
     try:
-        # Check if we are in a git repo
-        subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, check=True)
-        
-        # Get the diff
-        result = subprocess.run(
-            ["git", "diff", f"{base}...HEAD"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
+        check = _run_git(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd)
+        if check.returncode != 0:
+            return f"Error: '{cwd}' is not inside a git repository."
+        result = _run_git(["git", "diff", f"{base}...HEAD"], cwd=cwd)
+        return result.stdout or "(no changes)"
     except Exception as e:
-        return f"Error: No git repository found or git command failed: {e}"
+        return f"Error: git command failed: {e}"
 
-def get_changed_files(base="main"):
+def get_changed_files(base: str = "main", cwd: str = ".") -> list[str]:
     """Get a list of changed filenames relative to the base branch."""
     try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", f"{base}...HEAD"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        result = _run_git(["git", "diff", "--name-only", f"{base}...HEAD"], cwd=cwd)
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
     except Exception:
         return []
 
-def get_file_content_at_rev(file_path, rev="main"):
+def get_file_content_at_rev(file_path: str, rev: str = "main", cwd: str = ".") -> str | None:
     """Get the content of a file at a specific revision."""
     try:
-        result = subprocess.run(
-            ["git", "show", f"{rev}:{file_path}"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
+        result = _run_git(["git", "show", f"{rev}:{file_path}"], cwd=cwd)
+        return result.stdout if result.returncode == 0 else None
     except Exception:
         return None
