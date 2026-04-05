@@ -16,7 +16,9 @@ from contextlib import asynccontextmanager
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
-from .database import init_db, check_limits, log_usage, update_repo_count, get_or_create_installation
+from .database import init_db, check_limits, log_usage, update_repo_count, get_or_create_installation, upgrade_to_pro
+
+import stripe
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,10 +28,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="autoreadme GitHub App", lifespan=lifespan)
 
+from fastapi.responses import FileResponse
+
 @app.get("/")
 @app.get("/health")
 def health():
     return {"status": "ok", "app_id": GITHUB_APP_ID}
+
+@app.get("/success")
+def success():
+    return FileResponse("success.html")
+
+@app.get("/cancel")
+def cancel():
+    return FileResponse("cancel.html")
 
 # Config from env
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
@@ -47,6 +59,11 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# Stripe Config
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+stripe.api_key = STRIPE_API_KEY
 
 def get_jwt() -> str:
     payload = {
@@ -185,6 +202,52 @@ async def post_limit_reached_comment(installation_id: int, repo_full_name: str, 
     body = f"### ⚠️ Límite de Plan Gratuito Alcanzado\n\n{reason}\n\nPara seguir disfrutando de PR-Assistant sin límites, considera actualizar a nuestro plan Pro."
     async with httpx.AsyncClient() as client:
         await client.post(comment_url, headers=headers, json={"body": body})
+
+# --- STRIPE ENDPOINTS ---
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(installation_id: int):
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            line_items=[
+                {
+                    'price': os.getenv("STRIPE_PRICE_ID"), # ID del precio en Stripe
+                    'quantity': 1,
+                },
+            ],
+            mode='payment',
+            success_url=(os.getenv("PAYMENT_SUCCESS_URL") or "https://pr-assistant.dev/success") + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=(os.getenv("PAYMENT_CANCEL_URL") or "https://pr-assistant.dev/cancel"),
+            metadata={
+                'installation_id': str(installation_id)
+            }
+        )
+        return {"url": checkout_session.url}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get('stripe-signature')
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        installation_id = session.get('metadata', {}).get('installation_id')
+        if installation_id:
+            upgrade_to_pro(int(installation_id))
+            print(f"Installation {installation_id} upgraded to PRO")
+
+    return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn

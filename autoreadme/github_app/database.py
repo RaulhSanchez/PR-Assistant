@@ -78,5 +78,11 @@ def check_limits(installation_id: int) -> tuple[bool, str]:
     
     return True, ""
 
+def upgrade_to_pro(installation_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE installations SET plan_type = 'pro' WHERE installation_id = ?", (installation_id,))
+        conn.commit()
+
 if __name__ == "__main__":
     init_db()
