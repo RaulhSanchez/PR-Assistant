@@ -1,0 +1,2 @@
+# This file tells GitHub Pages to bypass Jekyll processing.
+# It prevents Jekyll from trying to parse the autoreadme templates (Jinja2) as Liquid.
