@@ -25,7 +25,14 @@ def health():
 
 # Config from env
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
-GITHUB_PRIVATE_KEY = os.getenv("GITHUB_PRIVATE_KEY")  # The actual RS232 key content
+def _parse_private_key(raw: str) -> str:
+    """Normalize the private key regardless of how it was stored in env vars."""
+    key = raw.replace("\\n", "\n").strip()
+    if not key.startswith("-----BEGIN"):
+        key = f"-----BEGIN RSA PRIVATE KEY-----\n{key}\n-----END RSA PRIVATE KEY-----"
+    return key
+
+GITHUB_PRIVATE_KEY = _parse_private_key(os.getenv("GITHUB_PRIVATE_KEY", ""))
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
 
 # LLM Config
