@@ -15,6 +15,7 @@ import httpx
 import stripe
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
@@ -56,13 +57,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PR-Assistant GitHub App", lifespan=lifespan)
 
+# CORS es necesario para que el navegador permita las llamadas del frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ── HTML pages ───────────────────────────────────────────────────────────────
 
 def _read_html(name: str) -> str:
     path = Path(__file__).parent / name
     return path.read_text()
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
+def landing():
+    # Buscamos index.html en la raíz del proyecto para servir la interfaz
+    root_dir = Path(__file__).parent.parent.parent
+    index_path = root_dir / "index.html"
+    if index_path.exists():
+        return index_path.read_text()
+    return HTMLResponse("<h1>index.html no encontrado</h1>", status_code=404)
+
 @app.get("/health")
 def health():
     return {"status": "ok", "app_id": GITHUB_APP_ID}
