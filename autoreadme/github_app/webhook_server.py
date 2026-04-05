@@ -13,7 +13,7 @@ import jwt
 import httpx
 import stripe
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
@@ -29,7 +29,8 @@ OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 STRIPE_API_KEY       = os.getenv("STRIPE_API_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID")
-BASE_URL             = os.getenv("BASE_URL", "https://pr-assistant-production-703c.up.railway.app")
+BASE_URL             = os.getenv("BASE_URL", "http://localhost:8000")
+GITHUB_APP_NAME      = os.getenv("GITHUB_APP_NAME", "repo-docs-ai")
 
 stripe.api_key = STRIPE_API_KEY
 
@@ -215,19 +216,17 @@ async def checkout_by_org(org: str):
     installation_id = None
     async with httpx.AsyncClient() as client:
         # Try org first, then user
-        for endpoint in [f"/orgs/{org}/installation", f"/users/{org}/installation"]:
-            r = await client.get(f"https://api.github.com/app{endpoint.replace('/app','')}", headers=headers)
+        for path in [f"/orgs/{org}/installation", f"/users/{org}/installation"]:
+            r = await client.get(f"https://api.github.com{path}", headers=headers)
             if r.status_code == 200:
                 installation_id = r.json().get("id")
                 break
     if not installation_id:
-        from fastapi.responses import HTMLResponse
         return HTMLResponse(
             "<h2 style='font-family:sans-serif;padding:2rem'>PR-Assistant not installed for this org.<br/>"
-            f"<a href='https://github.com/apps/repo-docs-ai'>Install it first →</a></h2>",
+            f"<a href='https://github.com/apps/{GITHUB_APP_NAME}'>Install it first →</a></h2>",
             status_code=404
         )
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url=f"/create-checkout-session?installation_id={installation_id}", status_code=302)
 
 @app.get("/create-checkout-session")
@@ -243,7 +242,6 @@ async def create_checkout_session(installation_id: int):
             metadata={"installation_id": str(installation_id)},
         )
         # Redirect user to Stripe checkout
-        from fastapi.responses import RedirectResponse
         return RedirectResponse(url=session.url, status_code=303)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
