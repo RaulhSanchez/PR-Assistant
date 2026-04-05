@@ -45,6 +45,8 @@ server = [
     "PyJWT[crypto]>=2.8",
     "openai>=1.0",
     "stripe>=9.0",
+    "google-generativeai>=0.7",
+    "psycopg2-binary>=2.9",
 ]
 all = [
     "ollama>=0.3",
@@ -71,4 +73,4 @@ where = ["."]
 include = ["autoreadme*"]
 
 [tool.setuptools.package-data]
-autoreadme = ["templates/*.md"]
+autoreadme = ["templates/*.md", "github_app/*.html"]

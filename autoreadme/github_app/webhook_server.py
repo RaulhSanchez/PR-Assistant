@@ -4,66 +4,72 @@ import hashlib
 import json
 import time
 import tempfile
-import shutil
 import subprocess
 from typing import Optional
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 import jwt
 import httpx
+import stripe
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-from contextlib import asynccontextmanager
+from fastapi.responses import HTMLResponse
 
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
 from .database import init_db, check_limits, log_usage, update_repo_count, get_or_create_installation, upgrade_to_pro
 
-import stripe
+# ── Config ──────────────────────────────────────────────────────────────────
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Initialize DB
-    init_db()
-    yield
+GITHUB_APP_ID        = os.getenv("GITHUB_APP_ID")
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
+LLM_PROVIDER         = os.getenv("LLM_PROVIDER", "gemini")
+LLM_MODEL            = os.getenv("LLM_MODEL")
+OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+STRIPE_API_KEY       = os.getenv("STRIPE_API_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID")
+BASE_URL             = os.getenv("BASE_URL", "https://pr-assistant-production-703c.up.railway.app")
 
-app = FastAPI(title="autoreadme GitHub App", lifespan=lifespan)
+stripe.api_key = STRIPE_API_KEY
 
-from fastapi.responses import FileResponse
-
-@app.get("/")
-@app.get("/health")
-def health():
-    return {"status": "ok", "app_id": GITHUB_APP_ID}
-
-@app.get("/success")
-def success():
-    return FileResponse("success.html")
-
-@app.get("/cancel")
-def cancel():
-    return FileResponse("cancel.html")
-
-# Config from env
-GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 def _parse_private_key(raw: str) -> str:
-    """Normalize the private key regardless of how it was stored in env vars."""
     key = raw.replace("\\n", "\n").strip()
     if not key.startswith("-----BEGIN"):
         key = f"-----BEGIN RSA PRIVATE KEY-----\n{key}\n-----END RSA PRIVATE KEY-----"
     return key
 
 GITHUB_PRIVATE_KEY = _parse_private_key(os.getenv("GITHUB_PRIVATE_KEY", ""))
-GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
 
-# LLM Config
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
-LLM_MODEL = os.getenv("LLM_MODEL")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# ── App ──────────────────────────────────────────────────────────────────────
 
-# Stripe Config
-STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-stripe.api_key = STRIPE_API_KEY
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(title="PR-Assistant GitHub App", lifespan=lifespan)
+
+# ── HTML pages ───────────────────────────────────────────────────────────────
+
+def _read_html(name: str) -> str:
+    path = Path(__file__).parent / name
+    return path.read_text()
+
+@app.get("/")
+@app.get("/health")
+def health():
+    return {"status": "ok", "app_id": GITHUB_APP_ID}
+
+@app.get("/success", response_class=HTMLResponse)
+def success():
+    return _read_html("success.html")
+
+@app.get("/cancel", response_class=HTMLResponse)
+def cancel():
+    return _read_html("cancel.html")
+
+# ── GitHub JWT ───────────────────────────────────────────────────────────────
 
 def get_jwt() -> str:
     payload = {
@@ -85,167 +91,155 @@ async def get_installation_token(installation_id: int) -> str:
         resp.raise_for_status()
         return resp.json()["token"]
 
-async def process_pr(installation_id: int, repo_full_name: str, pr_number: int, base_branch: str, head_branch: str, head_repo_url: str):
-    token = await get_installation_token(installation_id)
+# ── PR processing ────────────────────────────────────────────────────────────
 
-    # Init LLM
+async def process_pr(installation_id: int, repo_full_name: str, pr_number: int,
+                     base_branch: str, head_branch: str, head_repo_url: str):
+    token = await get_installation_token(installation_id)
     llm = get_provider(provider=LLM_PROVIDER, model=LLM_MODEL)
     if LLM_PROVIDER == "ollama":
         os.environ["OLLAMA_HOST"] = OLLAMA_BASE_URL
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Clone the repo with full history
         clone_url = head_repo_url.replace("https://", f"https://x-access-token:{token}@")
         subprocess.run(["git", "clone", clone_url, tmpdir], check=True, capture_output=True)
-
-        # Fetch all branches so both base and head are available
         subprocess.run(["git", "fetch", "--all"], cwd=tmpdir, check=True, capture_output=True)
-
-        # Checkout the PR's head branch
         subprocess.run(["git", "checkout", head_branch], cwd=tmpdir, check=True, capture_output=True)
-
-        # Generate report — diff is base_branch...HEAD (the PR's head branch)
         report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
 
-        # Log usage
-        log_usage(installation_id)
+    log_usage(installation_id)
 
-        # Post comment to PR
-        comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github+json",
-        }
-        async with httpx.AsyncClient() as client:
-            await client.post(comment_url, headers=headers, json={"body": report})
+    comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    async with httpx.AsyncClient() as client:
+        await client.post(comment_url, headers=headers, json={"body": report})
 
-@app.post("/webhook")
-async def webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_hub_signature_256: Optional[str] = Header(None)
-):
-    body = await request.body()
-    
-    # Verify signature
-    if GITHUB_WEBHOOK_SECRET:
-        if not x_hub_signature_256:
-            raise HTTPException(status_code=401, detail="Missing signature")
-        
-        sha_name, signature = x_hub_signature_256.split('=')
-        if sha_name != 'sha256':
-            raise HTTPException(status_code=501, detail="Non-SHA256 signature")
-        
-        hash_object = hmac.new(GITHUB_WEBHOOK_SECRET.encode(), msg=body, digestmod=hashlib.sha256)
-        if not hmac.compare_digest(hash_object.hexdigest(), signature):
-            raise HTTPException(status_code=401, detail="Invalid signature")
-
-    payload = json.loads(body)
-    event = request.headers.get("X-GitHub-Event")
-
-    if event == "installation":
-        action = payload.get("action")
-        installation_id = payload["installation"]["id"]
-        if action in ["created", "new_permissions_accepted"]:
-            # On creation, we ensure the installation exists in DB
-            get_or_create_installation(installation_id)
-        return {"status": "ok"}
-
-    if event == "installation_repositories":
-        action = payload.get("action")
-        installation_id = payload["installation"]["id"]
-        # In a real app we'd query GitHub to get the exact current count
-        # For now, let's assume we just need to ensure the record exists
-        get_or_create_installation(installation_id)
-        return {"status": "ok"}
-
-    if event == "pull_request":
-        action = payload.get("action")
-        if action in ["opened", "synchronize"]:
-            installation_id = payload["installation"]["id"]
-            
-            # CHECK LIMITS
-            allowed, reason = check_limits(installation_id)
-            if not allowed:
-                # Post a "Limit reached" comment instead of analyzing
-                repo_full_name = payload["repository"]["full_name"]
-                pr_number = payload["pull_request"]["number"]
-                background_tasks.add_task(post_limit_reached_comment, installation_id, repo_full_name, pr_number, reason)
-                return {"status": "limit_reached", "reason": reason}
-
-            repo_full_name = payload["repository"]["full_name"]
-            pr_number = payload["pull_request"]["number"]
-            base_branch = payload["pull_request"]["base"]["ref"]
-            head_branch = payload["pull_request"]["head"]["ref"]
-            head_repo_url = payload["pull_request"]["head"]["repo"]["clone_url"]
-
-            background_tasks.add_task(
-                process_pr,
-                installation_id,
-                repo_full_name,
-                pr_number,
-                base_branch,
-                head_branch,
-                head_repo_url,
-            )
-            return {"status": "processing"}
-
-    return {"status": "ignored"}
-
-async def post_limit_reached_comment(installation_id: int, repo_full_name: str, pr_number: int, reason: str):
+async def post_limit_reached_comment(installation_id: int, repo_full_name: str,
+                                      pr_number: int, reason: str):
     token = await get_installation_token(installation_id)
     comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github+json",
     }
-    body = f"### ⚠️ Límite de Plan Gratuito Alcanzado\n\n{reason}\n\nPara seguir disfrutando de PR-Assistant sin límites, considera actualizar a nuestro plan Pro."
+    checkout_url = f"{BASE_URL}/create-checkout-session?installation_id={installation_id}"
+    body = (
+        f"### ⚠️ PR-Assistant — Free Plan Limit Reached\n\n"
+        f"{reason}\n\n"
+        f"[**Upgrade to Pro →**]({checkout_url}) — Unlimited repos & analyses for $12/month."
+    )
     async with httpx.AsyncClient() as client:
         await client.post(comment_url, headers=headers, json={"body": body})
 
-# --- STRIPE ENDPOINTS ---
+# ── GitHub Webhook ───────────────────────────────────────────────────────────
 
-@app.post("/create-checkout-session")
+@app.post("/webhook")
+async def webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_hub_signature_256: Optional[str] = Header(None),
+):
+    body = await request.body()
+
+    if GITHUB_WEBHOOK_SECRET:
+        if not x_hub_signature_256:
+            raise HTTPException(status_code=401, detail="Missing signature")
+        sha_name, signature = x_hub_signature_256.split("=")
+        if sha_name != "sha256":
+            raise HTTPException(status_code=501, detail="Non-SHA256 signature")
+        mac = hmac.new(GITHUB_WEBHOOK_SECRET.encode(), msg=body, digestmod=hashlib.sha256)
+        if not hmac.compare_digest(mac.hexdigest(), signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = json.loads(body)
+    event = request.headers.get("X-GitHub-Event")
+
+    # Track new installations
+    if event == "installation":
+        installation_id = payload["installation"]["id"]
+        repos_added = payload.get("repositories", [])
+        inst = get_or_create_installation(installation_id)
+        if repos_added:
+            update_repo_count(installation_id, len(repos_added))
+        return {"status": "ok"}
+
+    # Track repo additions/removals
+    if event == "installation_repositories":
+        installation_id = payload["installation"]["id"]
+        inst = get_or_create_installation(installation_id)
+        added = len(payload.get("repositories_added", []))
+        removed = len(payload.get("repositories_removed", []))
+        new_count = max(0, inst["repo_count"] + added - removed)
+        update_repo_count(installation_id, new_count)
+        return {"status": "ok"}
+
+    if event == "pull_request":
+        action = payload.get("action")
+        if action in ["opened", "synchronize"]:
+            installation_id = payload["installation"]["id"]
+            allowed, reason = check_limits(installation_id)
+            repo_full_name = payload["repository"]["full_name"]
+            pr_number = payload["pull_request"]["number"]
+
+            if not allowed:
+                background_tasks.add_task(
+                    post_limit_reached_comment,
+                    installation_id, repo_full_name, pr_number, reason
+                )
+                return {"status": "limit_reached"}
+
+            base_branch = payload["pull_request"]["base"]["ref"]
+            head_branch = payload["pull_request"]["head"]["ref"]
+            head_repo_url = payload["pull_request"]["head"]["repo"]["clone_url"]
+            background_tasks.add_task(
+                process_pr,
+                installation_id, repo_full_name, pr_number,
+                base_branch, head_branch, head_repo_url,
+            )
+            return {"status": "processing"}
+
+    return {"status": "ignored"}
+
+# ── Stripe ───────────────────────────────────────────────────────────────────
+
+@app.get("/create-checkout-session")
 async def create_checkout_session(installation_id: int):
+    if not STRIPE_API_KEY or not STRIPE_PRICE_ID:
+        raise HTTPException(status_code=503, detail="Payments not configured")
     try:
-        checkout_session = stripe.checkout.Session.create(
-            line_items=[
-                {
-                    'price': os.getenv("STRIPE_PRICE_ID"), # ID del precio en Stripe
-                    'quantity': 1,
-                },
-            ],
-            mode='payment',
-            success_url=(os.getenv("PAYMENT_SUCCESS_URL") or "https://pr-assistant.dev/success") + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=(os.getenv("PAYMENT_CANCEL_URL") or "https://pr-assistant.dev/cancel"),
-            metadata={
-                'installation_id': str(installation_id)
-            }
+        session = stripe.checkout.Session.create(
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            mode="subscription",
+            success_url=f"{BASE_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{BASE_URL}/cancel",
+            metadata={"installation_id": str(installation_id)},
         )
-        return {"url": checkout_session.url}
+        # Redirect user to Stripe checkout
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=session.url, status_code=303)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/stripe-webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
-    sig_header = request.headers.get('stripe-signature')
-
+    sig_header = request.headers.get("stripe-signature")
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError as e:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
         raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError as e:
+    except stripe.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        installation_id = session.get('metadata', {}).get('installation_id')
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        installation_id = session.get("metadata", {}).get("installation_id")
         if installation_id:
             upgrade_to_pro(int(installation_id))
-            print(f"Installation {installation_id} upgraded to PRO")
+            print(f"✅ Installation {installation_id} upgraded to PRO")
 
     return {"status": "success"}
 
