@@ -153,10 +153,10 @@ async def process_pr(installation_id: int, repo_full_name: str, pr_number: int,
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             clone_url = head_repo_url.replace("https://", f"https://x-access-token:{token}@")
-            subprocess.run(["git", "clone", "--depth=50", clone_url, tmpdir],
+            # We need the branches, so we avoid --depth=50 unless we also use --no-single-branch
+            # A full clone is safest for small/medium repos.
+            subprocess.run(["git", "clone", clone_url, tmpdir],
                            check=True, capture_output=True, timeout=120)
-            subprocess.run(["git", "fetch", "--all"], cwd=tmpdir,
-                           check=True, capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", head_branch], cwd=tmpdir,
                            check=True, capture_output=True, timeout=30)
             report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
