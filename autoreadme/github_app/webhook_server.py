@@ -162,8 +162,10 @@ async def process_pr(installation_id: int, repo_full_name: str, pr_number: int,
             report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
     except subprocess.CalledProcessError as e:
         err = e.stderr.decode(errors="ignore") if e.stderr else str(e)
-        print(f"[process_pr] Git error: {err}")
-        await post_error_comment(token, repo_full_name, pr_number, "Could not clone or checkout the repository.")
+        print(f"[process_pr] Git error for {repo_full_name}: {err}")
+        # Only show a short snippet of the error to the user for security/brevity
+        short_err = err[:200] + "..." if len(err) > 200 else err
+        await post_error_comment(token, repo_full_name, pr_number, f"Could not clone or checkout the repository.\n\n**Error:** `{short_err}`")
         return
     except subprocess.TimeoutExpired:
         print(f"[process_pr] Git operation timed out for {repo_full_name}")
