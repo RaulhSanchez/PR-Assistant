@@ -981,41 +981,20 @@
       document.getElementById("modal-error").style.display = "none";
     }
 
-    async function submitUpgrade() {
+    function submitUpgrade() {
       const org = document.getElementById("gh-org-input").value.trim();
       const errEl = document.getElementById("modal-error");
       if (!org) {
+        errEl.style.color = "#f85149";
         errEl.textContent = "Please enter your GitHub organization or username.";
         errEl.style.display = "block";
         return;
       }
       errEl.style.display = "none";
       const btn = document.querySelector("#upgrade-modal button");
-      const originalText = btn.textContent;
-      btn.textContent = "Checking…";
+      btn.textContent = "Redirecting…";
       btn.disabled = true;
-
-      try {
-        const resp = await fetch(`${API}/check-payment?org=${encodeURIComponent(org)}`);
-        const data = await resp.json();
-
-        if (data.paid) {
-          errEl.style.color = "#3fb950"; // Green for info
-          errEl.textContent = "You've already paid! Redirecting to GitHub installation...";
-          errEl.style.display = "block";
-          setTimeout(() => {
-            window.location.href = `https://github.com/apps/repo-docs-ai/installations/new`;
-          }, 2000);
-        } else {
-          window.location.href = `${API}/checkout?org=${encodeURIComponent(org)}`;
-        }
-      } catch (e) {
-        errEl.style.color = "#f85149";
-        errEl.textContent = "Something went wrong. Please try again.";
-        errEl.style.display = "block";
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }
+      window.location.href = `${API}/checkout?org=${encodeURIComponent(org)}`;
     }
 
     // Close modal on backdrop click

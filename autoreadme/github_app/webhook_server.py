@@ -292,11 +292,17 @@ async def checkout_by_org(org: str):
     """Redirect directly to Stripe checkout using the provided GitHub org/username."""
     if not STRIPE_API_KEY or not STRIPE_PRICE_ID:
         raise HTTPException(status_code=503, detail="Payments not configured yet")
-    
-    # We no longer check if installed. We just go to Stripe.
+
+    # If they've already paid, send them straight to GitHub installation
+    if is_paid(org):
+        return RedirectResponse(
+            url=f"https://github.com/apps/{GITHUB_APP_NAME}/installations/new",
+            status_code=302,
+        )
+
     return RedirectResponse(
-        url=f"/create-checkout-session?org_name={quote(org)}", 
-        status_code=302
+        url=f"/create-checkout-session?org_name={quote(org)}",
+        status_code=302,
     )
 
 @app.get("/create-checkout-session")
