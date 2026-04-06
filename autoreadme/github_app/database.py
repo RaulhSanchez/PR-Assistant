@@ -45,6 +45,16 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Migrations: add columns that may be missing in older deployments
+    for migration in [
+        "ALTER TABLE installations ADD COLUMN IF NOT EXISTS org_name TEXT",
+        "ALTER TABLE installations ADD COLUMN IF NOT EXISTS repo_count INTEGER DEFAULT 0",
+        "ALTER TABLE installations ADD COLUMN IF NOT EXISTS plan_type TEXT DEFAULT 'free'",
+    ]:
+        try:
+            cursor.execute(migration)
+        except Exception:
+            pass
     conn.commit()
     cursor.close()
     conn.close()
