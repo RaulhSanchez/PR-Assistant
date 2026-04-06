@@ -20,9 +20,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..llm import get_provider
 from ..generator import generate_pr_companion_report
 from .database import (
-    init_db, check_limits, log_usage, update_repo_count, 
-    get_or_create_installation, upgrade_to_pro, add_pending_pro, 
-    check_and_activate_pro, is_paid, get_installation_by_org
+    init_db, check_limits, log_usage, update_repo_count,
+    get_or_create_installation, upgrade_to_pro, add_pending_pro,
+    check_and_activate_pro, is_paid, get_installation_by_org,
+    downgrade_to_free_by_org,
 )
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -48,6 +49,11 @@ def _parse_private_key(raw: str) -> str:
 
 GITHUB_PRIVATE_KEY = _parse_private_key(os.getenv("GITHUB_PRIVATE_KEY", ""))
 
+# Validate required secrets at startup
+_missing = [v for v in ["GITHUB_APP_ID", "GITHUB_PRIVATE_KEY", "GITHUB_WEBHOOK_SECRET"] if not os.getenv(v)]
+if _missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(_missing)}")
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -57,13 +63,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PR-Assistant GitHub App", lifespan=lifespan)
 
-# CORS es necesario para que el navegador permita las llamadas del frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "https://github.com",
+        "https://raulhsanchez.github.io",
+        BASE_URL,
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ── HTML pages ───────────────────────────────────────────────────────────────
@@ -117,29 +126,63 @@ async def get_installation_token(installation_id: int) -> str:
 
 # ── PR processing ────────────────────────────────────────────────────────────
 
+async def post_error_comment(token: str, repo_full_name: str, pr_number: int, message: str):
+    comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    body = f"### ⚠️ PR-Assistant — Analysis failed\n\n{message}\n\n_This is usually a temporary issue. It will retry on your next push._"
+    async with httpx.AsyncClient() as client:
+        await client.post(comment_url, headers=headers, json={"body": body})
+
 async def process_pr(installation_id: int, repo_full_name: str, pr_number: int,
                      base_branch: str, head_branch: str, head_repo_url: str):
-    token = await get_installation_token(installation_id)
-    llm = get_provider(provider=LLM_PROVIDER, model=LLM_MODEL)
-    if LLM_PROVIDER == "ollama":
-        os.environ["OLLAMA_HOST"] = OLLAMA_BASE_URL
+    try:
+        token = await get_installation_token(installation_id)
+    except Exception as e:
+        print(f"[process_pr] Failed to get installation token: {e}")
+        return
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        clone_url = head_repo_url.replace("https://", f"https://x-access-token:{token}@")
-        subprocess.run(["git", "clone", clone_url, tmpdir], check=True, capture_output=True)
-        subprocess.run(["git", "fetch", "--all"], cwd=tmpdir, check=True, capture_output=True)
-        subprocess.run(["git", "checkout", head_branch], cwd=tmpdir, check=True, capture_output=True)
-        report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
+    try:
+        llm = get_provider(provider=LLM_PROVIDER, model=LLM_MODEL)
+        if LLM_PROVIDER == "ollama":
+            os.environ["OLLAMA_HOST"] = OLLAMA_BASE_URL
+    except Exception as e:
+        print(f"[process_pr] Failed to init LLM provider: {e}")
+        await post_error_comment(token, repo_full_name, pr_number, "Could not initialize AI provider.")
+        return
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clone_url = head_repo_url.replace("https://", f"https://x-access-token:{token}@")
+            subprocess.run(["git", "clone", "--depth=50", clone_url, tmpdir],
+                           check=True, capture_output=True, timeout=120)
+            subprocess.run(["git", "fetch", "--all"], cwd=tmpdir,
+                           check=True, capture_output=True, timeout=60)
+            subprocess.run(["git", "checkout", head_branch], cwd=tmpdir,
+                           check=True, capture_output=True, timeout=30)
+            report = generate_pr_companion_report(tmpdir, llm, f"origin/{base_branch}")
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode(errors="ignore") if e.stderr else str(e)
+        print(f"[process_pr] Git error: {err}")
+        await post_error_comment(token, repo_full_name, pr_number, "Could not clone or checkout the repository.")
+        return
+    except subprocess.TimeoutExpired:
+        print(f"[process_pr] Git operation timed out for {repo_full_name}")
+        await post_error_comment(token, repo_full_name, pr_number, "Repository clone timed out.")
+        return
+    except Exception as e:
+        print(f"[process_pr] Analysis error: {e}")
+        await post_error_comment(token, repo_full_name, pr_number, "AI analysis failed. Please try again.")
+        return
 
     log_usage(installation_id)
 
-    comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-    }
-    async with httpx.AsyncClient() as client:
-        await client.post(comment_url, headers=headers, json={"body": report})
+    try:
+        comment_url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+        async with httpx.AsyncClient() as client:
+            await client.post(comment_url, headers=headers, json={"body": report})
+    except Exception as e:
+        print(f"[process_pr] Failed to post comment: {e}")
 
 async def post_limit_reached_comment(installation_id: int, repo_full_name: str,
                                       pr_number: int, reason: str):
@@ -287,14 +330,23 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         org_name = session.get("metadata", {}).get("org_name")
         if org_name:
-            # Try to upgrade immediately if already installed
             installation_id = get_installation_by_org(org_name)
             if installation_id:
                 upgrade_to_pro(installation_id)
-                print(f"🚀 Existing installation {installation_id} upgraded to Pro for {org_name}")
+                print(f"🚀 Installation {installation_id} upgraded to Pro for {org_name}")
             else:
                 add_pending_pro(org_name)
                 print(f"💰 Purchase completed for {org_name}. Pending installation.")
+
+    elif event["type"] in ("customer.subscription.deleted", "customer.subscription.updated"):
+        sub = event["data"]["object"]
+        # Only downgrade if subscription is actually cancelled/incomplete
+        status = sub.get("status", "")
+        if status in ("canceled", "incomplete_expired", "unpaid"):
+            org_name = sub.get("metadata", {}).get("org_name")
+            if org_name:
+                downgrade_to_free_by_org(org_name)
+                print(f"⬇️ {org_name} downgraded to Free (subscription {status})")
 
     return {"status": "success"}
 

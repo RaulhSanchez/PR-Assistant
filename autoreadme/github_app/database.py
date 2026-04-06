@@ -37,6 +37,14 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS usage_logs (
+            id BIGSERIAL PRIMARY KEY,
+            installation_id BIGINT NOT NULL,
+            event_type TEXT DEFAULT 'pr_analysis',
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     cursor.close()
     conn.close()
@@ -199,6 +207,23 @@ def upgrade_to_pro(installation_id: int):
     cursor.execute(
         f"UPDATE installations SET plan_type = 'pro' WHERE installation_id = {ph}",
         (installation_id,)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def downgrade_to_free_by_org(org_name: str):
+    conn = _get_conn()
+    cursor = conn.cursor()
+    ph = _placeholder()
+    cursor.execute(
+        f"UPDATE installations SET plan_type = 'free' WHERE org_name = {ph}",
+        (org_name,)
+    )
+    # Also remove from pending if they cancel before installing
+    cursor.execute(
+        f"DELETE FROM pending_pro_activations WHERE org_name = {ph}",
+        (org_name,)
     )
     conn.commit()
     cursor.close()
