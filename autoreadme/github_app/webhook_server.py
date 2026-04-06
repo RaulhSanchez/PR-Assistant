@@ -327,7 +327,7 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        org_name = session.get("metadata", {}).get("org_name")
+        org_name = getattr(session, "metadata", {}).get("org_name")
         if org_name:
             installation_id = get_installation_by_org(org_name)
             if installation_id:
@@ -340,9 +340,9 @@ async def stripe_webhook(request: Request):
     elif event["type"] in ("customer.subscription.deleted", "customer.subscription.updated"):
         sub = event["data"]["object"]
         # Only downgrade if subscription is actually cancelled/incomplete
-        status = sub.get("status", "")
+        status = getattr(sub, "status", "")
         if status in ("canceled", "incomplete_expired", "unpaid"):
-            org_name = sub.get("metadata", {}).get("org_name")
+            org_name = getattr(sub, "metadata", {}).get("org_name")
             if org_name:
                 downgrade_to_free_by_org(org_name)
                 print(f"⬇️ {org_name} downgraded to Free (subscription {status})")
